@@ -44,7 +44,7 @@ fn matches(cx: &mut ExtCtxt, sp: Span, tts: &[TokenTree])
                                               .collect());
     let mtch = p.parse_matchers();
     let prog = Program::new(mtch);
-    println!("{}", prog.insts);
+    // println!("{}", prog.insts);
     if run(&prog, &mut p, 0, prog.insts.len()) {
         MacExpr::new(quote_expr!(cx, true))
     } else {
@@ -204,7 +204,7 @@ impl<'r> Compiler<'r> {
     }
 }
 
-pub fn run<'r, 't>(prog: &'r Program, input: &'t mut Parser<'t>,
+pub fn run<'r, 't>(prog: &'r Program, input: &'t mut Parser<'t, TtReader<'t>>,
                    start: uint, end: uint) -> bool {
     Nfa {
         prog: prog,
@@ -220,7 +220,7 @@ struct Nfa<'r, 't> {
     start: uint,
     end: uint,
     ic: uint,
-    parser: &'t mut Parser<'t>,
+    parser: &'t mut Parser<'t, TtReader<'t>>,
 }
 
 impl<'r, 't> Nfa<'r, 't> {
@@ -267,7 +267,7 @@ impl<'r, 't> Nfa<'r, 't> {
     }
 
     fn step(&mut self, nlist: &mut Threads<'t>,
-            pc: uint, parser: &mut Option<Parser<'t>>)
+            pc: uint, parser: &mut Option<Parser<'t, TtReader<'t>>>)
            -> bool {
         match *self.prog.insts.get(pc) {
             Match => {
@@ -385,7 +385,7 @@ impl<'r, 't> Nfa<'r, 't> {
     }
 }
 
-fn parse_nt(parser: &mut Parser, name: &str) -> Option<Nonterminal> {
+fn parse_nt(parser: &mut Parser<TtReader>, name: &str) -> Option<Nonterminal> {
     match name {
         "item" => match parser.parse_item(Vec::new()) {
           Some(i) => Some(token::NtItem(i)),
@@ -431,7 +431,7 @@ fn parse_nt(parser: &mut Parser, name: &str) -> Option<Nonterminal> {
 struct Thread<'t> {
     pc: uint,
     // groups: Vec<Option<uint>>,
-    parser: Option<Parser<'t>>
+    parser: Option<Parser<'t, TtReader<'t>>>
 }
 
 struct Threads<'t> {
@@ -493,7 +493,7 @@ impl<'t> Threads<'t> {
     }
 
     #[inline]
-    fn pc<'a>(&'a mut self, i: uint) -> (uint, &'a mut Option<Parser<'t>>) {
+    fn pc<'a>(&'a mut self, i: uint) -> (uint, &'a mut Option<Parser<'t, TtReader<'t>>>) {
         let &Thread { pc, parser: ref mut popt } = self.queue.get_mut(i);
         (pc, popt)
     }
