@@ -1,0 +1,576 @@
+diff --git a/src/libsyntax/ext/base.rs b/src/libsyntax/ext/base.rs
+index a66d683..8dca17f 100644
+--- a/src/libsyntax/ext/base.rs
++++ b/src/libsyntax/ext/base.rs
+@@ -464,7 +464,7 @@ impl<'a> ExtCtxt<'a> {
+     }
+ 
+     pub fn new_parser_from_tts(&self, tts: &[ast::TokenTree])
+-        -> parser::Parser<'a> {
++        -> parser::Parser<'a, parse::lexer::TtReader<'a>> {
+         parse::tts_to_parser(self.parse_sess, Vec::from_slice(tts), self.cfg())
+     }
+ 
+diff --git a/src/libsyntax/ext/tt/macro_parser.rs b/src/libsyntax/ext/tt/macro_parser.rs
+index 509d5bd..5883b29 100644
+--- a/src/libsyntax/ext/tt/macro_parser.rs
++++ b/src/libsyntax/ext/tt/macro_parser.rs
+@@ -401,7 +401,7 @@ pub fn parse(sess: &ParseSess,
+                 }
+                 rdr.next_token();
+             } else /* bb_eis.len() == 1 */ {
+-                let mut rust_parser = Parser::new(sess, cfg.clone(), box rdr.clone());
++                let mut rust_parser = Parser::new(sess, cfg.clone(), rdr.clone());
+ 
+                 let mut ei = bb_eis.pop().unwrap();
+                 match ei.elts.get(ei.idx).node {
+@@ -425,7 +425,7 @@ pub fn parse(sess: &ParseSess,
+     }
+ }
+ 
+-pub fn parse_nt(p: &mut Parser, name: &str) -> Nonterminal {
++pub fn parse_nt<R: Reader>(p: &mut Parser<R>, name: &str) -> Nonterminal {
+     match name {
+       "item" => match p.parse_item(Vec::new()) {
+         Some(i) => token::NtItem(i),
+diff --git a/src/libsyntax/ext/tt/macro_rules.rs b/src/libsyntax/ext/tt/macro_rules.rs
+index 1eb37ab..caea039 100644
+--- a/src/libsyntax/ext/tt/macro_rules.rs
++++ b/src/libsyntax/ext/tt/macro_rules.rs
+@@ -18,7 +18,7 @@ use ext::base;
+ use ext::tt::macro_parser::{Success, Error, Failure};
+ use ext::tt::macro_parser::{NamedMatch, MatchedSeq, MatchedNonterminal};
+ use ext::tt::macro_parser::{parse, parse_or_else};
+-use parse::lexer::new_tt_reader;
++use parse::lexer::{Reader, new_tt_reader};
+ use parse::parser::Parser;
+ use parse::attr::ParserAttr;
+ use parse::token::{special_idents, gensym_ident};
+@@ -31,11 +31,11 @@ use std::cell::RefCell;
+ use std::rc::Rc;
+ use std::gc::Gc;
+ 
+-struct ParserAnyMacro<'a> {
+-    parser: RefCell<Parser<'a>>,
++struct ParserAnyMacro<'a, R> {
++    parser: RefCell<Parser<'a, R>>,
+ }
+ 
+-impl<'a> ParserAnyMacro<'a> {
++impl<'a, R: Reader> ParserAnyMacro<'a, R> {
+     /// Make sure we don't have any tokens left to parse, so we don't
+     /// silently drop anything. `allow_semi` is so that "optional"
+     /// semicolons at the end of normal expressions aren't complained
+@@ -58,7 +58,7 @@ impl<'a> ParserAnyMacro<'a> {
+     }
+ }
+ 
+-impl<'a> MacResult for ParserAnyMacro<'a> {
++impl<'a, R: Reader> MacResult for ParserAnyMacro<'a, R> {
+     fn make_expr(&self) -> Option<Gc<ast::Expr>> {
+         let ret = self.parser.borrow_mut().parse_expr();
+         self.ensure_complete_parse(true);
+@@ -190,7 +190,7 @@ fn generic_extension(cx: &ExtCtxt,
+                 let trncbr = new_tt_reader(&cx.parse_sess().span_diagnostic,
+                                            Some(named_matches),
+                                            rhs);
+-                let p = Parser::new(cx.parse_sess(), cx.cfg(), box trncbr);
++                let p = Parser::new(cx.parse_sess(), cx.cfg(), trncbr);
+                 // Let the context choose how to interpret the result.
+                 // Weird, but useful for X-macros.
+                 return box ParserAnyMacro {
+diff --git a/src/libsyntax/parse/attr.rs b/src/libsyntax/parse/attr.rs
+index 550dbfd..988dd6a 100644
+--- a/src/libsyntax/parse/attr.rs
++++ b/src/libsyntax/parse/attr.rs
+@@ -15,6 +15,7 @@ use parse::common::*; //resolve bug?
+ use parse::token;
+ use parse::parser::Parser;
+ use parse::token::INTERPOLATED;
++use parse::lexer::Reader;
+ 
+ use std::gc::{Gc, GC};
+ 
+@@ -29,7 +30,7 @@ pub trait ParserAttr {
+     fn parse_optional_meta(&mut self) -> Vec<Gc<ast::MetaItem>>;
+ }
+ 
+-impl<'a> ParserAttr for Parser<'a> {
++impl<'a, R: Reader> ParserAttr for Parser<'a, R> {
+     /// Parse attributes that appear before an item
+     fn parse_outer_attributes(&mut self) -> Vec<ast::Attribute> {
+         let mut attrs: Vec<ast::Attribute> = Vec::new();
+diff --git a/src/libsyntax/parse/mod.rs b/src/libsyntax/parse/mod.rs
+index a3e169c..b76bbb1 100644
+--- a/src/libsyntax/parse/mod.rs
++++ b/src/libsyntax/parse/mod.rs
+@@ -164,7 +164,7 @@ pub fn new_parser_from_source_str<'a>(sess: &'a ParseSess,
+                                       cfg: ast::CrateConfig,
+                                       name: String,
+                                       source: String)
+-                                      -> Parser<'a> {
++                                      -> Parser<'a, lexer::TtReader<'a>> {
+     filemap_to_parser(sess, string_to_filemap(sess, source, name), cfg)
+ }
+ 
+@@ -172,7 +172,7 @@ pub fn new_parser_from_source_str<'a>(sess: &'a ParseSess,
+ /// if the file doesn't exist
+ pub fn new_parser_from_file<'a>(sess: &'a ParseSess,
+                                 cfg: ast::CrateConfig,
+-                                path: &Path) -> Parser<'a> {
++                                path: &Path) -> Parser<'a, lexer::TtReader<'a>> {
+     filemap_to_parser(sess, file_to_filemap(sess, path, None), cfg)
+ }
+ 
+@@ -184,7 +184,7 @@ pub fn new_sub_parser_from_file<'a>(sess: &'a ParseSess,
+                                     path: &Path,
+                                     owns_directory: bool,
+                                     module_name: Option<String>,
+-                                    sp: Span) -> Parser<'a> {
++                                    sp: Span) -> Parser<'a, lexer::TtReader<'a>> {
+     let mut p = filemap_to_parser(sess, file_to_filemap(sess, path, Some(sp)), cfg);
+     p.owns_directory = owns_directory;
+     p.root_module_name = module_name;
+@@ -194,7 +194,7 @@ pub fn new_sub_parser_from_file<'a>(sess: &'a ParseSess,
+ /// Given a filemap and config, return a parser
+ pub fn filemap_to_parser<'a>(sess: &'a ParseSess,
+                              filemap: Rc<FileMap>,
+-                             cfg: ast::CrateConfig) -> Parser<'a> {
++                             cfg: ast::CrateConfig) -> Parser<'a, lexer::TtReader<'a>> {
+     tts_to_parser(sess, filemap_to_tts(sess, filemap), cfg)
+ }
+ 
+@@ -202,7 +202,7 @@ pub fn filemap_to_parser<'a>(sess: &'a ParseSess,
+ // compiler expands into it
+ pub fn new_parser_from_tts<'a>(sess: &'a ParseSess,
+                                cfg: ast::CrateConfig,
+-                               tts: Vec<ast::TokenTree>) -> Parser<'a> {
++                               tts: Vec<ast::TokenTree>) -> Parser<'a, lexer::TtReader<'a>> {
+     tts_to_parser(sess, tts, cfg)
+ }
+ 
+@@ -254,20 +254,20 @@ pub fn filemap_to_tts(sess: &ParseSess, filemap: Rc<FileMap>)
+     // parsing tt's probably shouldn't require a parser at all.
+     let cfg = Vec::new();
+     let srdr = lexer::StringReader::new(&sess.span_diagnostic, filemap);
+-    let mut p1 = Parser::new(sess, cfg, box srdr);
++    let mut p1 = Parser::new(sess, cfg, srdr);
+     p1.parse_all_token_trees()
+ }
+ 
+ /// Given tts and cfg, produce a parser
+ pub fn tts_to_parser<'a>(sess: &'a ParseSess,
+                          tts: Vec<ast::TokenTree>,
+-                         cfg: ast::CrateConfig) -> Parser<'a> {
++                         cfg: ast::CrateConfig) -> Parser<'a, lexer::TtReader<'a>> {
+     let trdr = lexer::new_tt_reader(&sess.span_diagnostic, None, tts);
+-    Parser::new(sess, cfg, box trdr)
++    Parser::new(sess, cfg, trdr)
+ }
+ 
+ /// Abort if necessary
+-pub fn maybe_aborted<T>(result: T, mut p: Parser) -> T {
++pub fn maybe_aborted<T, R: lexer::Reader>(result: T, mut p: Parser<R>) -> T {
+     p.abort_if_errors();
+     result
+ }
+diff --git a/src/libsyntax/parse/obsolete.rs b/src/libsyntax/parse/obsolete.rs
+index afcf847..040e5e6 100644
+--- a/src/libsyntax/parse/obsolete.rs
++++ b/src/libsyntax/parse/obsolete.rs
+@@ -21,6 +21,7 @@ use ast::{Expr, ExprLit, LitNil};
+ use codemap::{Span, respan};
+ use parse::parser;
+ use parse::token;
++use parse::lexer::Reader;
+ 
+ use std::gc::{Gc, GC};
+ 
+@@ -51,7 +52,7 @@ pub trait ParserObsoleteMethods {
+     fn eat_obsolete_ident(&mut self, ident: &str) -> bool;
+ }
+ 
+-impl<'a> ParserObsoleteMethods for parser::Parser<'a> {
++impl<'a, R: Reader> ParserObsoleteMethods for parser::Parser<'a, R> {
+     /// Reports an obsolete syntax non-fatal error.
+     fn obsolete(&mut self, sp: Span, kind: ObsoleteSyntax) {
+         let (kind_str, desc) = match kind {
+diff --git a/src/libsyntax/parse/parser.rs b/src/libsyntax/parse/parser.rs
+index 0116518..3093dd6 100644
+--- a/src/libsyntax/parse/parser.rs
++++ b/src/libsyntax/parse/parser.rs
+@@ -287,7 +287,7 @@ struct ParsedItemsAndViewItems {
+ 
+ /* ident is handled by common.rs */
+ 
+-pub struct Parser<'a> {
++pub struct Parser<'a, R> {
+     pub sess: &'a ParseSess,
+     /// the current token:
+     pub token: token::Token,
+@@ -304,7 +304,7 @@ pub struct Parser<'a> {
+     pub tokens_consumed: uint,
+     pub restriction: restriction,
+     pub quote_depth: uint, // not (yet) related to the quasiquoter
+-    pub reader: Box<Reader>,
++    pub reader: R,
+     pub interner: Rc<token::IdentInterner>,
+     /// The set of seen errors about obsolete syntax. Used to suppress
+     /// extra detail when the same error is seen twice
+@@ -340,10 +340,10 @@ fn real_token(rdr: &mut Reader) -> TokenAndSpan {
+     t
+ }
+ 
+-impl<'a> Parser<'a> {
++impl<'a, R: Reader> Parser<'a, R> {
+     pub fn new(sess: &'a ParseSess, cfg: ast::CrateConfig,
+-               mut rdr: Box<Reader>) -> Parser<'a> {
+-        let tok0 = real_token(rdr);
++               mut rdr: R) -> Parser<'a, R> {
++        let tok0 = real_token(&mut rdr as &mut Reader);
+         let span = tok0.sp;
+         let placeholder = TokenAndSpan {
+             tok: token::UNDERSCORE,
+@@ -385,11 +385,11 @@ impl<'a> Parser<'a> {
+ 
+     /// Convert the current token to a string using self's reader
+     pub fn this_token_to_string(&mut self) -> String {
+-        Parser::token_to_string(&self.token)
++        Parser::<R>::token_to_string(&self.token)
+     }
+ 
+     pub fn unexpected_last(&mut self, t: &token::Token) -> ! {
+-        let token_str = Parser::token_to_string(t);
++        let token_str = Parser::<R>::token_to_string(t);
+         let last_span = self.last_span;
+         self.span_fatal(last_span, format!("unexpected token: `{}`",
+                                                 token_str).as_slice());
+@@ -406,7 +406,7 @@ impl<'a> Parser<'a> {
+         if self.token == *t {
+             self.bump();
+         } else {
+-            let token_str = Parser::token_to_string(t);
++            let token_str = Parser::<R>::token_to_string(t);
+             let this_token_str = self.this_token_to_string();
+             self.fatal(format!("expected `{}` but found `{}`",
+                                token_str,
+@@ -420,15 +420,15 @@ impl<'a> Parser<'a> {
+     pub fn expect_one_of(&mut self,
+                          edible: &[token::Token],
+                          inedible: &[token::Token]) {
+-        fn tokens_to_string(tokens: &[token::Token]) -> String {
++        fn tokens_to_string<R: Reader>(tokens: &[token::Token]) -> String {
+             let mut i = tokens.iter();
+             // This might be a sign we need a connect method on Iterator.
+             let b = i.next()
+-                     .map_or("".to_string(), |t| Parser::token_to_string(t));
++                     .map_or("".to_string(), |t| Parser::<R>::token_to_string(t));
+             i.fold(b, |b,a| {
+                 let mut b = b;
+                 b.push_str("`, `");
+-                b.push_str(Parser::token_to_string(a).as_slice());
++                b.push_str(Parser::<R>::token_to_string(a).as_slice());
+                 b
+             })
+         }
+@@ -438,7 +438,7 @@ impl<'a> Parser<'a> {
+             // leave it in the input
+         } else {
+             let expected = edible.iter().map(|x| (*x).clone()).collect::<Vec<_>>().append(inedible);
+-            let expect = tokens_to_string(expected.as_slice());
++            let expect = tokens_to_string::<R>(expected.as_slice());
+             let actual = self.this_token_to_string();
+             self.fatal(
+                 (if expected.len() != 1 {
+@@ -618,7 +618,7 @@ impl<'a> Parser<'a> {
+             _ => {
+                 let token_str = self.this_token_to_string();
+                 let found_token =
+-                    Parser::token_to_string(&token::BINOP(token::AND));
++                    Parser::<R>::token_to_string(&token::BINOP(token::AND));
+                 self.fatal(format!("expected `{}`, found `{}`",
+                                    found_token,
+                                    token_str).as_slice())
+@@ -639,7 +639,7 @@ impl<'a> Parser<'a> {
+             _ => {
+                 let found_token = self.this_token_to_string();
+                 let token_str =
+-                    Parser::token_to_string(&token::BINOP(token::OR));
++                    Parser::<R>::token_to_string(&token::BINOP(token::OR));
+                 self.fatal(format!("expected `{}`, found `{}`",
+                                    token_str,
+                                    found_token).as_slice())
+@@ -691,7 +691,7 @@ impl<'a> Parser<'a> {
+     fn expect_lt(&mut self) {
+         if !self.eat_lt(true) {
+             let found_token = self.this_token_to_string();
+-            let token_str = Parser::token_to_string(&token::LT);
++            let token_str = Parser::<R>::token_to_string(&token::LT);
+             self.fatal(format!("expected `{}`, found `{}`",
+                                token_str,
+                                found_token).as_slice())
+@@ -702,7 +702,7 @@ impl<'a> Parser<'a> {
+     fn parse_seq_to_before_or<T>(
+                               &mut self,
+                               sep: &token::Token,
+-                              f: |&mut Parser| -> T)
++                              f: |&mut Parser<R>| -> T)
+                               -> Vec<T> {
+         let mut first = true;
+         let mut vector = Vec::new();
+@@ -741,7 +741,7 @@ impl<'a> Parser<'a> {
+                 self.replace_token(token::EQ, lo, span.hi)
+             }
+             _ => {
+-                let gt_str = Parser::token_to_string(&token::GT);
++                let gt_str = Parser::<R>::token_to_string(&token::GT);
+                 let this_token_str = self.this_token_to_string();
+                 self.fatal(format!("expected `{}`, found `{}`",
+                                    gt_str,
+@@ -755,7 +755,7 @@ impl<'a> Parser<'a> {
+     pub fn parse_seq_to_before_gt<T>(
+                                   &mut self,
+                                   sep: Option<token::Token>,
+-                                  f: |&mut Parser| -> T)
++                                  f: |&mut Parser<R>| -> T)
+                                   -> OwnedSlice<T> {
+         let mut first = true;
+         let mut v = Vec::new();
+@@ -778,7 +778,7 @@ impl<'a> Parser<'a> {
+     pub fn parse_seq_to_gt<T>(
+                            &mut self,
+                            sep: Option<token::Token>,
+-                           f: |&mut Parser| -> T)
++                           f: |&mut Parser<R>| -> T)
+                            -> OwnedSlice<T> {
+         let v = self.parse_seq_to_before_gt(sep, f);
+         self.expect_gt();
+@@ -792,7 +792,7 @@ impl<'a> Parser<'a> {
+                             &mut self,
+                             ket: &token::Token,
+                             sep: SeqSep,
+-                            f: |&mut Parser| -> T)
++                            f: |&mut Parser<R>| -> T)
+                             -> Vec<T> {
+         let val = self.parse_seq_to_before_end(ket, sep, f);
+         self.bump();
+@@ -806,7 +806,7 @@ impl<'a> Parser<'a> {
+                                    &mut self,
+                                    ket: &token::Token,
+                                    sep: SeqSep,
+-                                   f: |&mut Parser| -> T)
++                                   f: |&mut Parser<R>| -> T)
+                                    -> Vec<T> {
+         let mut first: bool = true;
+         let mut v = vec!();
+@@ -832,7 +832,7 @@ impl<'a> Parser<'a> {
+                                bra: &token::Token,
+                                ket: &token::Token,
+                                sep: SeqSep,
+-                               f: |&mut Parser| -> T)
++                               f: |&mut Parser<R>| -> T)
+                                -> Vec<T> {
+         self.expect(bra);
+         let result = self.parse_seq_to_before_end(ket, sep, f);
+@@ -847,7 +847,7 @@ impl<'a> Parser<'a> {
+                                bra: &token::Token,
+                                ket: &token::Token,
+                                sep: SeqSep,
+-                               f: |&mut Parser| -> T)
++                               f: |&mut Parser<R>| -> T)
+                                -> Vec<T> {
+         let result = self.parse_unspanned_seq(bra, ket, sep, f);
+         if result.is_empty() {
+@@ -865,7 +865,7 @@ impl<'a> Parser<'a> {
+                      bra: &token::Token,
+                      ket: &token::Token,
+                      sep: SeqSep,
+-                     f: |&mut Parser| -> T)
++                     f: |&mut Parser<R>| -> T)
+                      -> Spanned<Vec<T> > {
+         let lo = self.span.lo;
+         self.expect(bra);
+@@ -885,7 +885,7 @@ impl<'a> Parser<'a> {
+             None
+         };
+         let next = if self.buffer_start == self.buffer_end {
+-            real_token(self.reader)
++            real_token(&mut self.reader)
+         } else {
+             // Avoid token copies with `replace`.
+             let buffer_start = self.buffer_start as uint;
+@@ -929,7 +929,7 @@ impl<'a> Parser<'a> {
+                       -> R {
+         let dist = distance as int;
+         while self.buffer_length() < dist {
+-            self.buffer[self.buffer_end as uint] = real_token(self.reader);
++            self.buffer[self.buffer_end as uint] = real_token(&mut self.reader);
+             self.buffer_end = (self.buffer_end + 1) & 3;
+         }
+         f(&self.buffer[((self.buffer_start + dist - 1) & 3) as uint].tok)
+@@ -1987,7 +1987,7 @@ impl<'a> Parser<'a> {
+             _ if self.eat_keyword(keywords::While) => {
+                 return self.parse_while_expr();
+             },
+-            _ if Parser::token_is_lifetime(&self.token) => {
++            _ if Parser::<R>::token_is_lifetime(&self.token) => {
+                 let lifetime = self.get_lifetime();
+                 self.bump();
+                 self.expect(&token::COLON);
+@@ -2004,7 +2004,7 @@ impl<'a> Parser<'a> {
+             },
+             _ if self.eat_keyword(keywords::Continue) => {
+                 let lo = self.span.lo;
+-                let ex = if Parser::token_is_lifetime(&self.token) {
++                let ex = if Parser::<R>::token_is_lifetime(&self.token) {
+                     let lifetime = self.get_lifetime();
+                     self.bump();
+                     ExprAgain(Some(lifetime))
+@@ -2067,7 +2067,7 @@ impl<'a> Parser<'a> {
+             },
+             _ if self.eat_keyword(keywords::Break) => {
+                 // BREAK expression
+-                if Parser::token_is_lifetime(&self.token) {
++                if Parser::<R>::token_is_lifetime(&self.token) {
+                     let lifetime = self.get_lifetime();
+                     self.bump();
+                     ex = ExprBreak(Some(lifetime));
+@@ -2240,7 +2240,7 @@ impl<'a> Parser<'a> {
+     /// Parse an optional separator followed by a kleene-style
+     /// repetition token (+ or *).
+     pub fn parse_sep_and_zerok(&mut self) -> (Option<token::Token>, bool) {
+-        fn parse_zerok(parser: &mut Parser) -> Option<bool> {
++        fn parse_zerok<R: Reader>(parser: &mut Parser<R>) -> Option<bool> {
+             match parser.token {
+                 token::BINOP(token::STAR) | token::BINOP(token::PLUS) => {
+                     let zerok = parser.token == token::BINOP(token::STAR);
+@@ -2277,7 +2277,7 @@ impl<'a> Parser<'a> {
+         // not an EOF, and not the desired right-delimiter (if
+         // it were, parse_seq_to_before_end would have prevented
+         // reaching this point.
+-        fn parse_non_delim_tt_tok(p: &mut Parser) -> TokenTree {
++        fn parse_non_delim_tt_tok<R: Reader>(p: &mut Parser<R>) -> TokenTree {
+             maybe_whole!(deref p, NtTT);
+             match p.token {
+               token::RPAREN | token::RBRACE | token::RBRACKET => {
+@@ -2320,7 +2320,7 @@ impl<'a> Parser<'a> {
+         }
+ 
+         // turn the next token into a TTTok:
+-        fn parse_any_tt_tok(p: &mut Parser) -> TokenTree {
++        fn parse_any_tt_tok<R: Reader>(p: &mut Parser<R>) -> TokenTree {
+             TTTok(p.span, p.bump_and_get())
+         }
+ 
+@@ -3218,7 +3218,7 @@ impl<'a> Parser<'a> {
+     pub fn parse_stmt(&mut self, item_attrs: Vec<Attribute>) -> Gc<Stmt> {
+         maybe_whole!(self, NtStmt);
+ 
+-        fn check_expected_item(p: &mut Parser, found_attrs: bool) {
++        fn check_expected_item<R: Reader>(p: &mut Parser<R>, found_attrs: bool) {
+             // If we have attributes then we should have an item
+             if found_attrs {
+                 let last_span = p.last_span;
+@@ -3602,7 +3602,7 @@ impl<'a> Parser<'a> {
+         let mut ident = self.parse_ident();
+         let mut unbound = None;
+         if self.eat(&token::QUESTION) {
+-            let tref = Parser::trait_ref_from_ident(ident, span);
++            let tref = Parser::<R>::trait_ref_from_ident(ident, span);
+             unbound = Some(TraitTyParamBound(tref));
+             span = self.span;
+             ident = self.parse_ident();
+@@ -3674,7 +3674,7 @@ impl<'a> Parser<'a> {
+     }
+ 
+     fn forbid_lifetime(&mut self) {
+-        if Parser::token_is_lifetime(&self.token) {
++        if Parser::<R>::token_is_lifetime(&self.token) {
+             let span = self.span;
+             self.span_fatal(span, "lifetime parameters must be declared \
+                                         prior to type parameters");
+@@ -3767,9 +3767,9 @@ impl<'a> Parser<'a> {
+ 
+     /// Parse the argument list and result type of a function
+     /// that may have a self type.
+-    fn parse_fn_decl_with_self(&mut self, parse_arg_fn: |&mut Parser| -> Arg)
++    fn parse_fn_decl_with_self(&mut self, parse_arg_fn: |&mut Parser<R>| -> Arg)
+                                -> (ExplicitSelf, P<FnDecl>) {
+-        fn maybe_parse_borrowed_explicit_self(this: &mut Parser)
++        fn maybe_parse_borrowed_explicit_self<R: Reader>(this: &mut Parser<R>)
+                                               -> ast::ExplicitSelf_ {
+             // The following things are possible to see here:
+             //
+@@ -3783,23 +3783,23 @@ impl<'a> Parser<'a> {
+             if this.look_ahead(1, |t| token::is_keyword(keywords::Self, t)) {
+                 this.bump();
+                 SelfRegion(None, MutImmutable, this.expect_self_ident())
+-            } else if this.look_ahead(1, |t| Parser::token_is_mutability(t)) &&
++            } else if this.look_ahead(1, |t| Parser::<R>::token_is_mutability(t)) &&
+                     this.look_ahead(2,
+                                     |t| token::is_keyword(keywords::Self,
+                                                           t)) {
+                 this.bump();
+                 let mutability = this.parse_mutability();
+                 SelfRegion(None, mutability, this.expect_self_ident())
+-            } else if this.look_ahead(1, |t| Parser::token_is_lifetime(t)) &&
++            } else if this.look_ahead(1, |t| Parser::<R>::token_is_lifetime(t)) &&
+                        this.look_ahead(2,
+                                        |t| token::is_keyword(keywords::Self,
+                                                              t)) {
+                 this.bump();
+                 let lifetime = this.parse_lifetime();
+                 SelfRegion(Some(lifetime), MutImmutable, this.expect_self_ident())
+-            } else if this.look_ahead(1, |t| Parser::token_is_lifetime(t)) &&
++            } else if this.look_ahead(1, |t| Parser::<R>::token_is_lifetime(t)) &&
+                       this.look_ahead(2, |t| {
+-                          Parser::token_is_mutability(t)
++                          Parser::<R>::token_is_mutability(t)
+                       }) &&
+                       this.look_ahead(3, |t| token::is_keyword(keywords::Self,
+                                                                t)) {
+@@ -3847,7 +3847,7 @@ impl<'a> Parser<'a> {
+                 // Possibly "*self" or "*mut self" -- not supported. Try to avoid
+                 // emitting cryptic "unexpected token" errors.
+                 self.bump();
+-                let _mutability = if Parser::token_is_mutability(&self.token) {
++                let _mutability = if Parser::<R>::token_is_mutability(&self.token) {
+                     self.parse_mutability()
+                 } else {
+                     MutImmutable
+@@ -3860,7 +3860,7 @@ impl<'a> Parser<'a> {
+                 // error case, making bogus self ident:
+                 SelfValue(special_idents::self_)
+             }
+-            _ if Parser::token_is_mutability(&self.token) &&
++            _ if Parser::<R>::token_is_mutability(&self.token) &&
+                     self.look_ahead(1, |t| token::is_keyword(keywords::Self, t)) => {
+                 mutbl_self = self.parse_mutability();
+                 let self_ident = self.expect_self_ident();
+@@ -3873,7 +3873,7 @@ impl<'a> Parser<'a> {
+                     SelfValue(self_ident)
+                 }
+             }
+-            _ if Parser::token_is_mutability(&self.token) &&
++            _ if Parser::<R>::token_is_mutability(&self.token) &&
+                     self.look_ahead(1, |t| *t == token::TILDE) &&
+                     self.look_ahead(2, |t| token::is_keyword(keywords::Self, t)) => {
+                 mutbl_self = self.parse_mutability();
+@@ -4342,7 +4342,7 @@ impl<'a> Parser<'a> {
+                     "expected 'Sized?' after `for` in trait item");
+                 return None;
+             }
+-            let tref = Parser::trait_ref_from_ident(ident, span);
++            let tref = Parser::<R>::trait_ref_from_ident(ident, span);
+             Some(TraitTyParamBound(tref))
+         } else {
+             None
+@@ -4952,7 +4952,7 @@ impl<'a> Parser<'a> {
+             return IoviItem(item);
+         }
+         if self.is_keyword(keywords::Fn) &&
+-                self.look_ahead(1, |f| !Parser::fn_expr_lookahead(f)) {
++                self.look_ahead(1, |f| !Parser::<R>::fn_expr_lookahead(f)) {
+             // FUNCTION ITEM
+             self.bump();
+             let (ident, item_, extra_attrs) =

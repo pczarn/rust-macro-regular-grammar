@@ -29,6 +29,7 @@ use rustc::plugin::Registry;
 use std::any::{Any, AnyRefExt};
 use std::mem;
 use std::gc::GC;
+use std::collections::hashmap::HashSet;
 
 #[plugin_registrar]
 pub fn plugin_registrar(reg: &mut Registry) {
@@ -286,37 +287,52 @@ impl<'r, 't> Nfa<'r, 't> {
                 }
             }
             OneNonterminal(_, ty, _) => {
-                let (mut p, ttv) = {
+                /*let (mut p, ttv) =*/ {
                     let parser = match parser {
                         &Some(ref mut p) => p,
                         &None => &mut *self.parser
                     };
 
-                    let ttv = parser.parse_all_token_trees();
-                    let mut p = parse::new_parser_from_tts(parser.sess,
-                                                           parser.cfg.clone(),
-                                                           ttv.clone());
+                    // let ttv = parser.parse_all_token_trees();
+                    // let mut p = parse::new_parser_from_tts(parser.sess,
+                    //                                        parser.cfg.clone(),
+                    //                                        ttv.clone());
+                    // if parse_nt(&mut p, token::get_ident(ty).get()).is_some() {
+                    //     (p, ttv)
+                    // } else {
+                    //     mem::replace(parser, parse::new_parser_from_tts(p.sess,
+                    //                                                     p.cfg.clone(),
+                    //                                                     ttv));
+                    //     return false;
+                    // }
+                    // let ttr = parser.reader.clone();
+                    let mut p = clone_parser(parser);
                     if parse_nt(&mut p, token::get_ident(ty).get()).is_some() {
-                        (p, ttv)
-                    } else {
-                        mem::replace(parser, parse::new_parser_from_tts(p.sess,
-                                                                        p.cfg.clone(),
-                                                                        ttv));
-                        return false;
-                    }
+                        add_with_parser(self.prog.insts.as_slice(), nlist, pc+1, p);
+                        // parser.reader = ttr;
+                        // let parser = match parser {
+                        //     &Some(ref mut p) => p,
+                        //     &None => &mut *self.parser
+                        // };
+                        // *parser = Parser::new(parser.sess, parser.cfg.clone(), ttr);
+                    } 
+                    // else {
+                    //     // parser.reader = ttr;
+                    //     *parser = Parser::new(parser.sess, parser.cfg.clone(), ttr);
+                    // }
                 };
 
-                let ttv2 = p.parse_all_token_trees();
-                let mut p = parse::new_parser_from_tts(p.sess,
-                                                       p.cfg.clone(),
-                                                       ttv.clone());
+                // let ttv2 = p.parse_all_token_trees();
+                // let mut p = parse::new_parser_from_tts(p.sess,
+                //                                        p.cfg.clone(),
+                //                                        ttv.clone());
 
-                self.add_with_parser(nlist, pc+1, p.sess, p.cfg.clone(), ttv2.as_slice());
-                let parser = match parser {
-                    &Some(ref mut p) => p,
-                    &None => &mut *self.parser
-                };
-                mem::replace(parser, p);
+                // self.add_with_parser(nlist, pc+1, p.sess, p.cfg.clone(), ttv2.as_slice());
+                // let parser = match parser {
+                //     &Some(ref mut p) => p,
+                //     &None => &mut *self.parser
+                // };
+                // mem::replace(parser, p);
             }
             _ => {}
         }
@@ -359,28 +375,60 @@ impl<'r, 't> Nfa<'r, 't> {
             }
         }
     }
+}
 
-    fn add_with_parser<'a>(&self, nlist: &mut Threads<'a>, pc: uint, sess: &'a ParseSess, cfg: CrateConfig, tt: &[TokenTree]) {
-        if nlist.contains(pc) {
-            return
+pub fn clone_parser<'a>(this: &mut Parser<'a, TtReader<'a>>
+    //sess: &'a ParseSess, cfg: ast::CrateConfig,
+                       // mut rdr: R
+        ) -> Parser<'a, TtReader<'a>> {
+    let last_token = match &this.last_token {
+        &Some(ref t) => Some(t.clone()),
+        &None => None
+    };
+    let [ref t0, ref t1, ref t2, ref t3] = this.buffer;
+    Parser {
+        reader: this.reader.clone(),
+        interner: this.interner.clone(),
+        sess: this.sess,
+        cfg: this.cfg.clone(),
+        token: this.token.clone(),
+        span: this.span,
+        last_span: this.last_span,
+        last_token: last_token,
+        buffer: [t0.clone(), t1.clone(), t2.clone(), t3.clone()],
+        buffer_start: this.buffer_start,
+        buffer_end: this.buffer_end,
+        tokens_consumed: this.tokens_consumed,
+        restriction: this.restriction,
+        quote_depth: this.quote_depth,
+        obsolete_set: HashSet::new(),
+        mod_path_stack: Vec::new(),
+        open_braces: Vec::new(),
+        owns_directory: true,
+        root_module_name: None,
+    }
+}
+
+fn add_with_parser<'a>(insts: &[Inst], nlist: &mut Threads<'a>, pc: uint, mut parser: Parser<'a, TtReader<'a>>) {
+    if nlist.contains(pc) {
+        return
+    }
+    match insts[pc] {
+        Save(slot) => {
+            // nlist.add_with_parser(pc, parser);
+            add_with_parser(insts, nlist, pc + 1, parser);
         }
-        match *self.prog.insts.get(pc) {
-            Save(slot) => {
-                nlist.add_with_parser(pc, sess, cfg.clone(), tt);
-                self.add_with_parser(nlist, pc + 1, sess, cfg, tt);
-            }
-            Jump(to) => {
-                nlist.add_with_parser(pc, sess, cfg.clone(), tt);
-                self.add_with_parser(nlist, to, sess, cfg, tt)
-            }
-            Split(x, y) => {
-                nlist.add_with_parser(pc, sess, cfg.clone(), tt);
-                self.add_with_parser(nlist, x, sess, cfg.clone(), tt);
-                self.add_with_parser(nlist, y, sess, cfg, tt);
-            }
-            _ => {
-                nlist.add_with_parser(pc, sess, cfg, tt);
-            }
+        Jump(to) => {
+            nlist.add_with_parser(pc, clone_parser(&mut parser));
+            add_with_parser(insts, nlist, to, parser)
+        }
+        Split(x, y) => {
+            nlist.add_with_parser(pc, clone_parser(&mut parser));
+            add_with_parser(insts, nlist, x, clone_parser(&mut parser));
+            add_with_parser(insts, nlist, y, parser);
+        }
+        _ => {
+            nlist.add_with_parser(pc, parser);
         }
     }
 }
@@ -468,15 +516,11 @@ impl<'t> Threads<'t> {
         self.size += 1;
     }
 
-    fn add_with_parser(&mut self, pc: uint, sess: &'t ParseSess, cfg: CrateConfig, tts: &[TokenTree]) {
+    fn add_with_parser(&mut self, pc: uint, parser: Parser<'t, TtReader<'t>>) {
         let t = self.queue.get_mut(self.size);
         t.pc = pc;
-        let p = parse::new_parser_from_tts(sess,
-                                           cfg,
-                                           tts.iter()
-                                              .map(|x| (*x).clone())
-                                              .collect());
-        t.parser = Some(p);
+        // let p = Parser::new(parser.sess, parser.cfg.clone(), parser.reader.clone());
+        t.parser = Some(parser);
         *self.sparse.get_mut(pc) = self.size;
         self.size += 1;
     }

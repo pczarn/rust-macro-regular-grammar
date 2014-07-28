@@ -28,7 +28,9 @@ fn main() {
         matches!((a $(x $x:ident)+) a x z x yyy)
     );
 
-    // matches!((a $([x $x:ident])+) a [x z] [x yyy]);
+    assert!(
+        matches!((a $([x $x:ident])+) a [x z] [x yyy])
+    );
 
     assert!(
         matches!(
