@@ -267,8 +267,8 @@ impl<'r, 't> Nfa<'r, 't> {
         matched
     }
 
-    fn step(&mut self, nlist: &mut Threads<'t>,
-            pc: uint, parser: &mut Option<Parser<'t, TtReader<'t>>>)
+    fn step(&mut self, nlist: &mut Threads<'t>, pc: uint,
+            parser: &mut Option<Parser<'t, TtReader<'t>>>)
            -> bool {
         match *self.prog.insts.get(pc) {
             Match => {
@@ -287,52 +287,16 @@ impl<'r, 't> Nfa<'r, 't> {
                 }
             }
             OneNonterminal(_, ty, _) => {
-                /*let (mut p, ttv) =*/ {
-                    let parser = match parser {
-                        &Some(ref mut p) => p,
-                        &None => &mut *self.parser
-                    };
-
-                    // let ttv = parser.parse_all_token_trees();
-                    // let mut p = parse::new_parser_from_tts(parser.sess,
-                    //                                        parser.cfg.clone(),
-                    //                                        ttv.clone());
-                    // if parse_nt(&mut p, token::get_ident(ty).get()).is_some() {
-                    //     (p, ttv)
-                    // } else {
-                    //     mem::replace(parser, parse::new_parser_from_tts(p.sess,
-                    //                                                     p.cfg.clone(),
-                    //                                                     ttv));
-                    //     return false;
-                    // }
-                    // let ttr = parser.reader.clone();
-                    let mut p = clone_parser(parser);
-                    if parse_nt(&mut p, token::get_ident(ty).get()).is_some() {
-                        add_with_parser(self.prog.insts.as_slice(), nlist, pc+1, p);
-                        // parser.reader = ttr;
-                        // let parser = match parser {
-                        //     &Some(ref mut p) => p,
-                        //     &None => &mut *self.parser
-                        // };
-                        // *parser = Parser::new(parser.sess, parser.cfg.clone(), ttr);
-                    } 
-                    // else {
-                    //     // parser.reader = ttr;
-                    //     *parser = Parser::new(parser.sess, parser.cfg.clone(), ttr);
-                    // }
+                let parser = match parser {
+                    &Some(ref mut p) => p,
+                    &None => &mut *self.parser
                 };
 
-                // let ttv2 = p.parse_all_token_trees();
-                // let mut p = parse::new_parser_from_tts(p.sess,
-                //                                        p.cfg.clone(),
-                //                                        ttv.clone());
+                let mut p = clone_parser(parser);
 
-                // self.add_with_parser(nlist, pc+1, p.sess, p.cfg.clone(), ttv2.as_slice());
-                // let parser = match parser {
-                //     &Some(ref mut p) => p,
-                //     &None => &mut *self.parser
-                // };
-                // mem::replace(parser, p);
+                if parse_nt(&mut p, token::get_ident(ty).get()).is_some() {
+                    add_with_parser(self.prog.insts.as_slice(), nlist, pc+1, p);
+                }
             }
             _ => {}
         }
@@ -377,10 +341,8 @@ impl<'r, 't> Nfa<'r, 't> {
     }
 }
 
-pub fn clone_parser<'a>(this: &mut Parser<'a, TtReader<'a>>
-    //sess: &'a ParseSess, cfg: ast::CrateConfig,
-                       // mut rdr: R
-        ) -> Parser<'a, TtReader<'a>> {
+pub fn clone_parser<'a>(this: &mut Parser<'a, TtReader<'a>>)
+                        -> Parser<'a, TtReader<'a>> {
     let last_token = match &this.last_token {
         &Some(ref t) => Some(t.clone()),
         &None => None
@@ -414,8 +376,7 @@ fn add_with_parser<'a>(insts: &[Inst], nlist: &mut Threads<'a>, pc: uint, mut pa
         return
     }
     match insts[pc] {
-        Save(slot) => {
-            // nlist.add_with_parser(pc, parser);
+        Save(_slot) => {
             add_with_parser(insts, nlist, pc + 1, parser);
         }
         Jump(to) => {
@@ -435,10 +396,7 @@ fn add_with_parser<'a>(insts: &[Inst], nlist: &mut Threads<'a>, pc: uint, mut pa
 
 fn parse_nt(parser: &mut Parser<TtReader>, name: &str) -> Option<Nonterminal> {
     match name {
-        "item" => match parser.parse_item(Vec::new()) {
-          Some(i) => Some(token::NtItem(i)),
-          None => None
-        },
+        "item" => parser.parse_item(Vec::new()).map(token::NtItem),
         "block" => Some(token::NtBlock(parser.parse_block())),
         "stmt" => Some(token::NtStmt(parser.parse_stmt(Vec::new()))),
         "pat" => Some(token::NtPat(parser.parse_pat())),
@@ -452,26 +410,20 @@ fn parse_nt(parser: &mut Parser<TtReader>, name: &str) -> Option<Nonterminal> {
         "ty" => Some(token::NtTy(parser.parse_ty(false /* no need to disambiguate*/))),
         // this could be handled like a token, since it is one
         "ident" => match parser.token {
-          token::IDENT(sn,b) => { parser.bump(); Some(token::NtIdent(box sn,b)) }
-          _ => {
-              // let token_str = token::to_str(&p.token);
-              // p.fatal((format!("expected ident, found {}",
-                               // token_str.as_slice())).as_slice())
-                None
-          }
+            token::IDENT(sn,b) => { parser.bump(); Some(token::NtIdent(box sn,b)) }
+            _ => None
         },
         "path" => {
-          Some(token::NtPath(box parser.parse_path(parser::LifetimeAndTypesWithoutColons).path))
+            Some(token::NtPath(box parser.parse_path(parser::LifetimeAndTypesWithoutColons).path))
         }
         "meta" => Some(token::NtMeta(parser.parse_meta_item())),
         "tt" => {
-          parser.quote_depth += 1u; //but in theory, non-quoted tts might be useful
-          let res = token::NtTT(box(GC) parser.parse_token_tree());
-          parser.quote_depth -= 1u;
-          Some(res)
+            parser.quote_depth += 1u; //but in theory, non-quoted tts might be useful
+            let res = token::NtTT(box(GC) parser.parse_token_tree());
+            parser.quote_depth -= 1u;
+            Some(res)
         }
         "matchers" => Some(token::NtMatchers(parser.parse_matchers())),
-        // _ => p.fatal("unsupported builtin nonterminal parser: ".to_owned() + name)
         _ => None
     }
 }
@@ -517,10 +469,10 @@ impl<'t> Threads<'t> {
     }
 
     fn add_with_parser(&mut self, pc: uint, parser: Parser<'t, TtReader<'t>>) {
-        let t = self.queue.get_mut(self.size);
-        t.pc = pc;
-        // let p = Parser::new(parser.sess, parser.cfg.clone(), parser.reader.clone());
-        t.parser = Some(parser);
+        *self.queue.get_mut(self.size) = Thread {
+            pc: pc,
+            parser: Some(parser)
+        };
         *self.sparse.get_mut(pc) = self.size;
         self.size += 1;
     }
