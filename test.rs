@@ -25,6 +25,10 @@ fn main() {
     );
 
     assert!(
+        matches!((a $x:expr 1 2 3) a {} 1 2 3)
+    );
+
+    assert!(
         matches!((a $(x $x:ident)+) a x z x yyy)
     );
 
@@ -34,13 +38,14 @@ fn main() {
 
     assert!(
         matches!(
-            ($BitFlags:ident: $T:ty
-                $($Flag:ident $(= $value:expr)*),*
-            )
+            ($BitFlags:ident: $T:ty {
+                $($Flag:ident $(= $value:expr)*),+
+            })
 
-            Flags: uint
+            Flags: uint {
                 A = 1,
                 B = 2
+            }
         )
     );
 }

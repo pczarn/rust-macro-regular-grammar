@@ -97,11 +97,9 @@ impl Program {
             names: Vec::with_capacity(10),
         };
 
-        c.insts.push(Save(0));
         for m in ast.move_iter() {
             c.compile(m);
         }
-        c.insts.push(Save(1));
         c.insts.push(Match);
 
         let Compiler { insts, names } = c;
@@ -128,25 +126,48 @@ impl<'r> Compiler<'r> {
                 self.push(OneTerminal(tok))
             }
             MatchSeq(seq, sep, true, lo, hi) => {
+                // Handle the separator, if present.
+                let zero_split = if sep.is_some() {
+                    Some(self.empty_split())
+                } else {
+                    None
+                };
                 let j1 = self.insts.len();
                 let split = self.empty_split();
                 let j2 = self.insts.len();
+
+                sep.map(|sep| self.push(OneTerminal(sep)));
+                let jump_mtch = self.insts.len();
                 for mtch in seq.move_iter() {
                     self.compile(mtch);
                 }
+
                 let jmp = self.empty_jump();
                 let j3 = self.insts.len();
 
                 self.set_jump(jmp, j1);
+                zero_split.map(|spl| self.set_split(spl, jump_mtch, j3));
                 self.set_split(split, j2, j3);
             }
             MatchSeq(seq, sep, false, lo, hi) => {
-                let j1 = self.insts.len();
+                let mut j1 = self.insts.len();
+
                 for mtch in seq.move_iter() {
                     self.compile(mtch);
                 }
                 let split = self.empty_split();
+
                 let j2 = self.insts.len();
+
+                match sep {
+                    Some(sep) => {
+                        self.push(OneTerminal(sep));
+                        let j = self.empty_jump();
+                        self.set_jump(j, j1);
+                        j1 = self.insts.len();
+                    }
+                    None => ()
+                }
 
                 self.set_split(split, j1, j2);
             }
@@ -244,7 +265,7 @@ impl<'r, 't> Nfa<'r, 't> {
             // This simulates a preceding '.*?' for every regex by adding
             // a state starting at the current position in the input for the
             // beginning of the program only if we don't already have a match.
-            if clist.size == 0 || (!matched) {
+            if clist.size == 0 /*|| (!matched)*/ {
                 self.add(clist, 0)
             }
 
@@ -283,7 +304,17 @@ impl<'r, 't> Nfa<'r, 't> {
                     parser.token == *tok
                 };
                 if is_match {
-                    self.add(nlist, pc+1);
+                    match parser {
+                        &Some(ref mut p) => {
+                            // This thread has its own parser and must advance
+                            // it after a successful match.
+                            p.bump();
+                            add_with_parser(self.prog.insts.as_slice(), nlist, pc+1, clone_parser(p));
+                        }
+                        &None => {
+                            self.add(nlist, pc+1);
+                        }
+                    }
                 }
             }
             OneNonterminal(_, ty, _) => {
